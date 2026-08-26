@@ -1,37 +1,58 @@
+import os
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from dotenv import load_dotenv
 
-def compute_acoustic_zones(input_file: Path, output_file: Path):
-    """
-    Ingests TEOS-10 features, calculates vertical gradients, 
-    and flags tactical acoustic zones (Thermoclines and Sound Channels).
-    """
-    print(f"[*] Loading Acoustic Features from: {input_file.name}")
+# 1. Load Environment Configuration
+load_dotenv()
+data_drive_root = os.getenv("DATA_DRIVE_PATH")
+
+if not data_drive_root:
+    print("[!] Warning: DATA_DRIVE_PATH not found in .env. Falling back to local ./data folder.")
+    data_drive_root = Path(__file__).resolve().parent.parent.parent / "data"
+
+PROCESSED_DIR = Path(data_drive_root) / "processed"
+
+def compute_acoustic_zones():
+    input_file = PROCESSED_DIR / "acoustic_features.csv"
+    output_file = PROCESSED_DIR / "tactical_acoustic_zones.csv"
     
+    print("=" * 70)
+    print("AcousticGuard-OS | Phase 16: Scaled Tactical Heuristics Engine")
+    print("=" * 70)
+    print(f"[*] Loading massive acoustic dataset from: {input_file.name}")
+    
+    if not input_file.exists():
+        print("[!] CRITICAL ERROR: acoustic_features.csv not found. Run the Feature Factory first.")
+        return
+        
     try:
+        # Load the 24,204+ rows
         df = pd.read_csv(input_file)
         
-        # 1. Sort data to ensure correct depth (pressure) order for gradient math
-        df = df.sort_values(by=['latitude', 'longitude', 'pressure']).reset_index(drop=True)
+        # 1. Sort strictly by profile and depth to guarantee physics calculations
+        df = df.sort_values(by=['profile_id', 'pressure']).reset_index(drop=True)
         
-        # Initialize new tactical columns
+        # Initialize the new tactical columns
         df['temp_gradient'] = 0.0
         df['sound_speed_gradient'] = 0.0
         df['is_thermocline'] = False
         df['is_sound_channel'] = False
 
-        # Group by unique profile locations (Lat/Lon pairs)
-        grouped = df.groupby(['latitude', 'longitude'])
+        # 2. Group by unique float to prevent cross-profile gradient corruption
+        grouped = df.groupby('profile_id')
         processed_profiles = []
         
         thermocline_count = 0
         sound_channel_count = 0
 
-        for (_lat, _lon), group in grouped:
+        print(f"[*] Isolating and processing {len(grouped)} individual ocean profiles...")
+
+        for profile_id, group in grouped:
             group = group.copy()
             
-            # We need at least 3 depth points to calculate meaningful gradients
+            # Need at least 3 points for meaningful central difference gradients
             if len(group) < 3:
                 processed_profiles.append(group)
                 continue
@@ -40,51 +61,44 @@ def compute_acoustic_zones(input_file: Path, output_file: Path):
             temps = group['in_situ_temp'].values
             speeds = group['sound_speed'].values
 
-            # 2. Calculate Gradients (dc/dz and dT/dz)
-            # np.gradient computes the derivative using central differences
+            # 3. Calculate Gradients (dc/dz and dT/dz) using central differences
             dTdz = np.gradient(temps, depths)
             dcdz = np.gradient(speeds, depths)
 
             group['temp_gradient'] = dTdz
             group['sound_speed_gradient'] = dcdz
 
-            # 3. Detect Thermocline (Steep negative temperature gradient)
-            # Threshold: Temperature drops by more than 0.05 degrees per dbar (meter)
+            # 4. Detect Thermocline: Temperature drops by more than 0.05 degrees per dbar
             group['is_thermocline'] = dTdz < -0.05
             thermocline_count += group['is_thermocline'].sum()
 
-            # 4. Detect Deep Sound Channel (Local Minimum in Sound Speed)
-            # A sound channel exists where sound speed stops decreasing and starts increasing
-            for i in range(1, len(speeds) - 1):
-                if speeds[i] < speeds[i-1] and speeds[i] < speeds[i+1]:
-                    # Using .iloc to safely update the specific row
-                    col_idx = group.columns.get_loc('is_sound_channel')
-                    group.iloc[i, col_idx] = True
-                    sound_channel_count += 1
+            # 5. Detect Deep Sound Channel: Local Minimum in Sound Speed
+            # Vectorized approach for speed: compare shifted arrays
+            prev_speed = np.roll(speeds, 1)
+            next_speed = np.roll(speeds, -1)
+            
+            local_minima = (speeds < prev_speed) & (speeds < next_speed)
+            # Exclude boundaries (surface and seafloor cannot be a true internal channel axis)
+            local_minima[0] = False
+            local_minima[-1] = False
+            
+            group['is_sound_channel'] = local_minima
+            sound_channel_count += local_minima.sum()
 
             processed_profiles.append(group)
 
-        # 5. Recombine and Save
+        # 6. Recombine and Save the ground-truth labeled dataset
         final_df = pd.concat(processed_profiles, ignore_index=True)
-        
-        output_file.parent.mkdir(parents=True, exist_ok=True)
         final_df.to_csv(output_file, index=False)
         
-        print(f"[*] Analysis Complete:")
-        print(f"    - Thermocline layers detected: {thermocline_count}")
-        print(f"    - Deep Sound Channels detected: {sound_channel_count}")
-        print(f"[+] Success! Tactical zones saved to: {output_file.name}")
+        print("=" * 70)
+        print(f"[+] Tactical Analysis Complete!")
+        print(f"    - Thermocline layers flagged: {thermocline_count}")
+        print(f"    - Deep Sound Channels flagged: {sound_channel_count}")
+        print(f"[+] Success! Ground-truth dataset saved to: {output_file.name}")
         
     except Exception as e:
         print(f"[!] CRITICAL ERROR in acoustic engine: {e}")
 
 if __name__ == "__main__":
-    # Dynamically resolve paths
-    BASE_DIR = Path(__file__).resolve().parent.parent.parent
-    INPUT_DATA_PATH = BASE_DIR / "data" / "processed" / "acoustic_features.csv"
-    OUTPUT_DATA_PATH = BASE_DIR / "data" / "processed" / "tactical_acoustic_zones.csv"
-    
-    if not INPUT_DATA_PATH.exists():
-        print(f"[!] Error: {INPUT_DATA_PATH.name} is missing. Engineer 1's pipeline must run first.")
-    else:
-        compute_acoustic_zones(INPUT_DATA_PATH, OUTPUT_DATA_PATH)
+    compute_acoustic_zones()
