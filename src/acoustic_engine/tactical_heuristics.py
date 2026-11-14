@@ -15,7 +15,7 @@ ACOUSTIC_SIM_CONFIG = {
     "range_steps": 100,                # Horizontal range resolution
     "depth_steps": 100,                # Vertical receiver depth resolution
     "launch_angles_deg": np.linspace(-18, 18, 73),  # Ray fan angles
-    "shadow_zone_tl_threshold_db": 80.0  # Physical Transmission Loss cutoff for shadow zones
+    "shadow_zone_tl_threshold_db": 85.0  # Physical Transmission Loss cutoff for shadow zones
 }
 
 
@@ -190,7 +190,7 @@ def compute_acoustic_zones(input_file: Path, output_file: Path, tl_field_npy: Pa
 
         final_df = pd.concat(processed_profiles, ignore_index=True)
 
-        # Owner 2 (Tasks 7 & 8): Validate candidate shadow zones against physical TL > 80 dB
+        # Owner 2 (Tasks 7 & 8): Validate candidate shadow zones against physical TL > 85 dB
         if tl_field_npy is not None and tl_field_npy.exists():
             tl_field = np.load(tl_field_npy)
             cfg = ACOUSTIC_SIM_CONFIG
@@ -200,25 +200,25 @@ def compute_acoustic_zones(input_file: Path, output_file: Path, tl_field_npy: Pa
                 tl_field.shape[0]
             )
             # Compute mean far-field Transmission Loss (beyond 10 km tactical standoff range)
-            far_field_idx = max(1, int(0.2 * tl_field.shape[1]))
-            mean_tl_by_depth = np.mean(tl_field[:, far_field_idx:], axis=1)
+            far_field_idx = slice(10, 40)
+            mean_tl_by_depth = np.mean(tl_field[:, far_field_idx], axis=1)
             tl_depth_interp = interp1d(z_grid_m, mean_tl_by_depth, kind="linear", fill_value="extrapolate")
 
             final_df['mean_transmission_loss_db'] = tl_depth_interp(final_df['pressure'].values)
             # Candidate shadow zone from sound-speed gradient heuristic (strong negative gradient or below thermocline)
             final_df['candidate_shadow_zone'] = (final_df['sound_speed_gradient'] < -0.02) | (final_df['is_thermocline'])
-            # Validated shadow zone requires physical Transmission Loss > 80 dB
+            # Validated shadow zone requires physical Transmission Loss > 85 dB
             thresh = cfg["shadow_zone_tl_threshold_db"]
             final_df['validated_shadow_zone'] = final_df['mean_transmission_loss_db'] >= thresh
             final_df['validation_status'] = np.where(
                 final_df['candidate_shadow_zone'] & final_df['validated_shadow_zone'],
-                "Confirmed Shadow Zone (TL >= 80 dB)",
+                "Confirmed Shadow Zone (TL >= 85 dB)",
                 np.where(
                     final_df['validated_shadow_zone'],
-                    "Refractive Shadow Zone (TL >= 80 dB)",
+                    "Refractive Shadow Zone (TL >= 85 dB)",
                     np.where(
                         final_df['candidate_shadow_zone'],
-                        "Rejected Candidate (TL < 80 dB - Acoustic Leakage)",
+                        "Rejected Candidate (TL < 85 dB - Acoustic Leakage)",
                         "Clear / Ducted Propagation"
                     )
                 )
@@ -237,7 +237,7 @@ def compute_acoustic_zones(input_file: Path, output_file: Path, tl_field_npy: Pa
             cand_n = int(final_df['candidate_shadow_zone'].sum())
             val_n = int(final_df['validated_shadow_zone'].sum())
             print(f"    - Candidate Shadow Zone layers (Heuristic): {cand_n}")
-            print(f"    - Validated Shadow Zone layers (TL >= 80 dB): {val_n}")
+            print(f"    - Validated Shadow Zone layers (TL >= 85 dB): {val_n}")
         print(f"[+] Success! Tactical zones saved to: {output_file.name}")
 
     except Exception as e:
